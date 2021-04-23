@@ -21,8 +21,6 @@
  * implementations.
  */
 
-#if 0
-
 #ifdef __GNUC__
 /*
  * Note:
