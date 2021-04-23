@@ -42,6 +42,7 @@
 
 from __future__ import print_function
 
+import codecs
 import logging
 import optparse
 import os
@@ -57,6 +58,8 @@ from collections import Counter
 import signal
 import threading
 import multiprocessing
+
+import util
 
 #######################################################################
 # based on _monkeyYaml.py
@@ -324,6 +327,46 @@ def parse_test_record(src, name, onerror=print):
     return test_record
 
 
+_STARS_ES5_1 = re.compile(r"\s*\n\s*\*\s?")
+_AT_ATTRS_ES5_1 = re.compile(r"\s*\n\s*\*\s*@")
+_RECORD_PATTERN_ES5_1 = re.compile( # Should match anything
+    r"^((?:(?:\s*\/\/.*)?\s*\n)*)" # header pattern
+    + r"(?:\/\*\*?((?:\s|\S)*?)\*\/\s*\n)" # capture comment pattern
+    + r"?((?:\s|\S)*)$" # any pattern
+)
+
+
+def strip_stars_es5_1(text):
+    return _STARS_ES5_1.sub('\n', text).strip()
+
+
+def parse_test_record_es5_1(src, name, onerror=print):
+    test_record = {}
+    match = _RECORD_PATTERN_ES5_1.match(src)
+    if match is None:
+        onerror('unrecognized: ' + name)
+    test_record['header'] = match.group(1).strip()
+    test_record['test'] = match.group(3) # do not trim
+    if match.group(2):
+        prop_texts = _AT_ATTRS_ES5_1.split(match.group(2))
+        test_record['commentary'] = strip_stars_es5_1(prop_texts[0])
+        del prop_texts[0]
+        for prop_text in prop_texts:
+            prop_match = re.match(r"^\w+", prop_text)
+            if prop_match is None:
+                onerror('Malformed "@" attribute: ' + name)
+            prop_name = prop_match.group(0)
+            prop_val = strip_stars_es5_1(prop_text[len(prop_name):])
+
+            if prop_name in test_record:
+                onerror('duplicate: ' + prop_name)
+            if prop_name == 'negative':
+                test_record['negative'] = {'type': ''}
+            else:
+                test_record[prop_name] = prop_val
+    return test_record
+
+
 #######################################################################
 # based on test262.py
 #######################################################################
@@ -344,6 +387,8 @@ def build_options():
                       help="The command-line to run")
     result.add_option("--tests", default=path.abspath('.'),
                       help="Path to the tests")
+    result.add_option('--es5.1', dest='es5_1', default=False, action='store_true',
+                      help='Run test262 ES5.1 version')
     result.add_option("--exclude-list", default=None,
                       help="Path to the excludelist.xml file")
     result.add_option("--cat", default=False, action="store_true",
@@ -402,13 +447,13 @@ class TempFile(object):
             text=self.text)
 
     def write(self, string):
-        os.write(self.file_desc, string)
+        os.write(self.file_desc, string.encode("utf8", "ignore"))
 
     def read(self):
-        file_desc = file(self.name)
+        file_desc = open(self.name, "rb")
         result = file_desc.read()
         file_desc.close()
-        return result
+        return result.decode("utf8", "ignore")
 
     def close(self):
         if not self.is_closed:
@@ -460,12 +505,12 @@ class TestResult(object):
     def write_output(self, target):
         out = self.stdout.strip()
         if out:
-            target.write("--- output --- \n %s" % out)
+            target.write(u"--- output --- \n %s" % out)
         error = self.stderr.strip()
         if error:
-            target.write("--- errors ---  \n %s" % error)
+            target.write(u"--- errors ---  \n %s" % error)
 
-        target.write("\n--- exit code: %d ---\n" % self.exit_code)
+        target.write(u"\n--- exit code: %d ---\n" % self.exit_code)
 
     def has_failed(self):
         return self.exit_code != 0
@@ -495,9 +540,12 @@ class TestCase(object):
         self.name = name
         self.full_path = full_path
         self.strict_mode = strict_mode
-        with open(self.full_path) as file_desc:
-            self.contents = file_desc.read()
-        test_record = parse_test_record(self.contents, name)
+        with open(self.full_path, "rb") as file_desc:
+            self.contents = file_desc.read().decode("utf8", "ignore")
+        if self.suite.es5_1:
+            test_record = parse_test_record_es5_1(self.contents, name)
+        else:
+            test_record = parse_test_record(self.contents, name)
         self.test = test_record["test"]
         del test_record["test"]
         del test_record["header"]
@@ -565,6 +613,25 @@ class TestCase(object):
         return '\n'.join([self.suite.get_include(include) for include in self.get_include_list()])
 
     def get_source(self):
+        if self.suite.es5_1:
+            return self.get_source_es5_1()
+        return self.get_source_esnext()
+
+    def get_source_es5_1(self):
+        source = self.suite.get_include('cth.js') + \
+            self.suite.get_include('sta.js') + \
+            self.suite.get_include('ed.js') + \
+            self.suite.get_include('testBuiltInObject.js') + \
+            self.suite.get_include('testIntl.js') + \
+            self.test + '\n'
+
+        if self.strict_mode:
+            source = '"use strict";\nvar strict_mode = true;\n' + source
+        else:
+            source = 'var strict_mode = false;\n' + source
+        return source
+
+    def get_source_esnext(self):
         if self.is_raw():
             return self.test
 
@@ -601,8 +668,7 @@ class TestCase(object):
 
         return re.sub(r"\{\{(\w+)\}\}", get_parameter, template)
 
-    @staticmethod
-    def execute(command):
+    def execute(self, command):
         if is_windows():
             args = '%s' % command
         else:
@@ -617,7 +683,8 @@ class TestCase(object):
                 stdout=stdout.file_desc,
                 stderr=stderr.file_desc
             )
-            timer = threading.Timer(TEST262_CASE_TIMEOUT, process.kill)
+            timeout = None if self.suite.es5_1 else TEST262_CASE_TIMEOUT
+            timer = threading.Timer(timeout, process.kill)
             timer.start()
             code = process.wait()
             timer.cancel()
@@ -641,11 +708,11 @@ class TestCase(object):
             'path': arg
         })
 
-        (code, out, err) = TestCase.execute(command)
+        (code, out, err) = self.execute(command)
         return TestResult(code, out, err, self)
 
     def run(self):
-        tmp = TempFile(suffix=".js", prefix="test262-", text=True)
+        tmp = TempFile(suffix=".js", prefix="test262-")
         try:
             result = self.run_test_in(tmp)
         finally:
@@ -715,9 +782,15 @@ def percent_format(partial, total):
 
 class TestSuite(object):
 
+    #pylint: disable=too-many-instance-attributes
     def __init__(self, options):
-        self.test_root = path.join(options.tests, 'test')
-        self.lib_root = path.join(options.tests, 'harness')
+        self.es5_1 = options.es5_1
+        if self.es5_1:
+            self.test_root = path.join(options.tests, 'test', 'suite')
+            self.lib_root = path.join(options.tests, 'test', 'harness')
+        else:
+            self.test_root = path.join(options.tests, 'test')
+            self.lib_root = path.join(options.tests, 'harness')
         self.strict_only = options.strict_only
         self.non_strict_only = options.non_strict_only
         self.unmarked_default = options.unmarked_default
@@ -754,7 +827,9 @@ class TestSuite(object):
         if not tests:
             return True
         for test in tests:
-            if test in rel_path:
+            # logging.warn(os.path.normpath(test))
+            # logging.warn(os.path.normpath(rel_path))
+            if os.path.normpath(test) in os.path.normpath(rel_path):
                 return True
         return False
 
@@ -762,8 +837,8 @@ class TestSuite(object):
         if not name in self.include_cache:
             static = path.join(self.lib_root, name)
             if path.exists(static):
-                with open(static) as file_desc:
-                    contents = file_desc.read()
+                with open(static, "rb") as file_desc:
+                    contents = file_desc.read().decode("utf8", "ignore")
                     contents = re.sub(r'\r\n', '\n', contents)
                     self.include_cache[name] = contents + "\n"
             else:
@@ -851,7 +926,7 @@ class TestSuite(object):
             report_error("No tests to run")
         progress = ProgressIndicator(len(cases))
         if logname:
-            self.logf = open(logname, "w")
+            self.logf = codecs.open(logname, "w", encoding="utf8", errors="ignore")
 
         if job_count == 1:
             for case in cases:
@@ -917,6 +992,7 @@ class TestSuite(object):
 
 
 def main():
+    util.setup_stdio()
     code = 0
     parser = build_options()
     (options, args) = parser.parse_args()

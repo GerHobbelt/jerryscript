@@ -84,7 +84,7 @@ typedef struct
  *
  * @return last error value.
  */
-static inline int
+static inline int JERRY_ATTR_ALWAYS_INLINE
 jerryx_debugger_tcp_get_errno (void)
 {
 #ifdef _WIN32
@@ -97,7 +97,7 @@ jerryx_debugger_tcp_get_errno (void)
 /**
  * Correctly close a single socket.
  */
-static inline void
+static inline void JERRY_ATTR_ALWAYS_INLINE
 jerryx_debugger_tcp_close_socket (jerryx_socket_t socket_id) /**< socket to close */
 {
 #ifdef _WIN32
@@ -143,6 +143,30 @@ jerryx_debugger_tcp_close (jerry_debugger_transport_header_t *header_p) /**< tcp
   JERRYX_ASSERT (!jerry_debugger_transport_is_connected ());
 
   jerryx_debugger_transport_tcp_t *tcp_p = (jerryx_debugger_transport_tcp_t *) header_p;
+
+  /* Waiting for the debug client close the tcp connection first. */
+  while (true)
+  {
+    char buf[8];
+    jerryx_socket_ssize_t result = recv (tcp_p->tcp_socket, buf, sizeof (buf), 0);
+    if (result == 0)
+    {
+      /**
+       * If result == 0, means the socket are closed by remote client, break the loop
+       */
+      break;
+    }
+    else if (result < 0 && jerryx_debugger_tcp_get_errno () != JERRYX_EWOULDBLOCK)
+    {
+      /* errno other than JERRYX_EWOULDBLOCK means socket have true error, break the loop */
+      break;
+    }
+    /**
+      * If result > 0, means that there is data available on the socket, waiting.
+      * If result < 0 and errno == JERRYX_EWOULDBLOCK, means have no data but
+      * the socket still available, waiting.
+      */
+  }
 
   JERRYX_DEBUG_MSG ("TCP connection closed.\n");
 

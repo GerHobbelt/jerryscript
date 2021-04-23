@@ -22,6 +22,7 @@ import hashlib
 import os
 import platform
 import subprocess
+import threading
 import sys
 import settings
 
@@ -32,6 +33,9 @@ else:
     import util
 
 OUTPUT_DIR = os.path.join(settings.PROJECT_DIR, 'build', 'tests')
+
+# All run_check proc must finished in 15 minutes, may increase in future
+JERRY_CHECK_TIMEOUT = 15 * 60
 
 Options = collections.namedtuple('Options', ['name', 'build_args', 'test_args', 'skip'])
 Options.__new__.__defaults__ = ([], [], False)
@@ -68,10 +72,7 @@ JERRY_UNITTESTS_OPTIONS = [
             OPTIONS_COMMON + OPTIONS_DOCTESTS + OPTIONS_PROFILE_ES51),
     Options('unittests-es5.1-init-fini',
             OPTIONS_COMMON + OPTIONS_UNITTESTS + OPTIONS_PROFILE_ES51
-            + ['--cmake-param=-DFEATURE_INIT_FINI=ON'],
-            skip=skip_if((sys.platform == 'win32'), 'FEATURE_INIT_FINI build flag isn\'t supported on Windows,' +
-                         ' because Microsoft Visual C/C++ Compiler doesn\'t support' +
-                         ' library constructors and destructors.')),
+            + ['--cmake-param=-DFEATURE_INIT_FINI=ON']),
     Options('unittests-es5.1-math',
             OPTIONS_COMMON + OPTIONS_UNITTESTS + OPTIONS_PROFILE_ES51
             + ['--jerry-math=on']),
@@ -81,7 +82,7 @@ JERRY_UNITTESTS_OPTIONS = [
 JERRY_TESTS_OPTIONS = [
     Options('jerry_tests-es.next',
             OPTIONS_COMMON + OPTIONS_PROFILE_ESNEXT + OPTIONS_STACK_LIMIT + OPTIONS_GC_MARK_LIMIT
-            + OPTIONS_MEM_STRESS),
+            + OPTIONS_MEM_STRESS + ['--line-info=on', '--error-messages=on']),
     Options('jerry_tests-es5.1',
             OPTIONS_COMMON + OPTIONS_PROFILE_ES51 + OPTIONS_STACK_LIMIT + OPTIONS_GC_MARK_LIMIT),
     Options('jerry_tests-es5.1-snapshot',
@@ -151,8 +152,7 @@ JERRY_BUILDOPTIONS = [
             ['--shared-libs=on'],
             skip=skip_if((sys.platform == 'win32'), 'Not yet supported, link failure on Windows')),
     Options('buildoption_test-cmdline_test',
-            ['--jerry-cmdline-test=on'],
-            skip=skip_if((sys.platform == 'win32'), 'rand() can\'t be overriden on Windows (benchmarking.c)')),
+            ['--jerry-cmdline-test=on']),
     Options('buildoption_test-cmdline_snapshot',
             ['--jerry-cmdline-snapshot=on']),
     Options('buildoption_test-recursion_limit',
@@ -200,8 +200,10 @@ def get_arguments():
                         help='Run jerry-debugger tests')
     parser.add_argument('--jerry-tests', action='store_true',
                         help='Run jerry-tests')
-    parser.add_argument('--test262', action='store_true',
-                        help='Run test262 - ES5.1')
+    parser.add_argument('--test262', default=False, const='default',
+                        nargs='?', choices=['default', 'all', 'update'],
+                        help='Run test262 - ES5.1. default: all tests except excludelist, ' +
+                        'all: all tests, update: all tests and update excludelist')
     parser.add_argument('--test262-es2015', default=False, const='default',
                         nargs='?', choices=['default', 'all', 'update'],
                         help='Run test262 - ES2015. default: all tests except excludelist, ' +
@@ -246,12 +248,14 @@ def report_command(cmd_type, cmd, env=None):
         sys.stderr.write(''.join('%s%s=%r \\%s\n' % (TERM_BLUE, var, val, TERM_NORMAL)
                                  for var, val in sorted(env.items())))
     sys.stderr.write('%s%s%s\n' % (TERM_BLUE, (' \\%s\n\t%s' % (TERM_NORMAL, TERM_BLUE)).join(cmd), TERM_NORMAL))
+    sys.stderr.flush()
 
 def report_skip(job):
     sys.stderr.write('%sSkipping: %s' % (TERM_YELLOW, job.name))
     if job.skip:
         sys.stderr.write(' (%s)' % job.skip)
     sys.stderr.write('%s\n' % TERM_NORMAL)
+    sys.stderr.flush()
 
 def create_binary(job, options):
     build_args = job.build_args[:]
@@ -282,13 +286,14 @@ def create_binary(job, options):
     if binary_key in BINARY_CACHE:
         ret, build_dir_path = BINARY_CACHE[binary_key]
         sys.stderr.write('(skipping: already built at %s with returncode %d)\n' % (build_dir_path, ret))
+        sys.stderr.flush()
         return ret, build_dir_path
 
     try:
         subprocess.check_output(build_cmd)
         ret = 0
     except subprocess.CalledProcessError as err:
-        print(err.output)
+        print(err.output.decode(errors="ignore"))
         ret = err.returncode
 
     BINARY_CACHE[binary_key] = (ret, build_dir_path)
@@ -319,6 +324,7 @@ def iterate_test_runner_jobs(jobs, options):
 
         if build_dir_path in tested_paths:
             sys.stderr.write('(skipping: already tested with %s)\n' % build_dir_path)
+            sys.stderr.flush()
             continue
         else:
             tested_paths.add(build_dir_path)
@@ -328,6 +334,7 @@ def iterate_test_runner_jobs(jobs, options):
 
         if bin_hash in tested_hashes:
             sys.stderr.write('(skipping: already tested with equivalent %s)\n' % tested_hashes[bin_hash])
+            sys.stderr.flush()
             continue
         else:
             tested_hashes[bin_hash] = build_dir_path
@@ -346,7 +353,10 @@ def run_check(runnable, env=None):
         env = full_env
 
     proc = subprocess.Popen(runnable, env=env)
+    timer = threading.Timer(JERRY_CHECK_TIMEOUT, proc.kill)
+    timer.start()
     proc.wait()
+    timer.cancel()
     return proc.returncode
 
 def run_jerry_debugger_tests(options):
@@ -362,7 +372,7 @@ def run_jerry_debugger_tests(options):
                 if test_file.endswith(".cmd"):
                     test_case, _ = os.path.splitext(test_file)
                     test_case_path = os.path.join(settings.DEBUGGER_TESTS_DIR, test_case)
-                    test_cmd = [
+                    test_cmd = util.get_python_cmd_prefix() + [
                         settings.DEBUGGER_TEST_RUNNER_SCRIPT,
                         get_binary_path(build_dir_path),
                         channel,
@@ -440,7 +450,8 @@ def run_test262_test_suite(options):
             test_cmd.append('--esnext')
             test_cmd.append(options.test262_esnext)
         else:
-            test_cmd.append('--es51')
+            test_cmd.append('--es5.1')
+            test_cmd.append(options.test262)
 
         if job.test_args:
             test_cmd.extend(job.test_args)
@@ -498,6 +509,7 @@ def run_buildoption_test(options):
 Check = collections.namedtuple('Check', ['enabled', 'runner', 'arg'])
 
 def main(options):
+    util.setup_stdio()
     checks = [
         Check(options.check_signed_off, run_check, [settings.SIGNED_OFF_SCRIPT]
               + {'tolerant': ['--tolerant'], 'gh-actions': ['--gh-actions']}.get(options.check_signed_off, [])),
