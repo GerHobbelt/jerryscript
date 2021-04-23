@@ -21,6 +21,8 @@
  * implementations.
  */
 
+#if 0
+
 #ifdef __GNUC__
 /*
  * Note:
@@ -60,3 +62,5 @@ int rand (void)
 {
   return 4; /* Chosen by fair dice roll. Guaranteed to be random. */
 } /* rand */
+
+#endif
