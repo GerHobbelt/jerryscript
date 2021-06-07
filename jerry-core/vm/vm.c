@@ -291,8 +291,8 @@ vm_run_global (const ecma_compiled_code_t *bytecode_p, /**< pointer to bytecode 
 
   vm_frame_ctx_shared_t shared;
   shared.bytecode_header_p = bytecode_p;
+  shared.function_object_p = NULL;
   shared.status_flags = 0;
-  shared.called_object_p = script_object_p;
 
 #if JERRY_BUILTIN_REALMS
   ecma_value_t this_binding = ((ecma_global_object_t *) global_obj_p)->this_binding;
@@ -388,8 +388,8 @@ vm_run_eval (ecma_compiled_code_t *bytecode_data_p, /**< byte-code data */
 
   vm_frame_ctx_shared_t shared;
   shared.bytecode_header_p = bytecode_data_p;
+  shared.function_object_p = NULL;
   shared.status_flags = (parse_opts & ECMA_PARSE_DIRECT_EVAL) ? VM_FRAME_CTX_SHARED_DIRECT_EVAL : 0;
-  shared.called_object_p = NULL;
 
   ecma_value_t completion_value = vm_run (&shared, this_binding, lex_env_p);
 
@@ -430,8 +430,8 @@ vm_run_module (ecma_module_t *module_p) /**< module to be executed */
 
   vm_frame_ctx_shared_t shared;
   shared.bytecode_header_p = module_p->u.compiled_code_p;
+  shared.function_object_p = &module_p->header.object;
   shared.status_flags = 0;
-  shared.called_object_p = &module_p->header.object;
 
   return vm_run (&shared, ECMA_VALUE_UNDEFINED, module_p->scope_p);
 } /* vm_run_module */
@@ -544,7 +544,7 @@ vm_get_class_function (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
 
   if (frame_ctx_p->shared_p->status_flags & VM_FRAME_CTX_SHARED_NON_ARROW_FUNC)
   {
-    return frame_ctx_p->shared_p->called_object_p;
+    return frame_ctx_p->shared_p->function_object_p;
   }
 
   ecma_environment_record_t *environment_record_p = ecma_op_get_environment_record (frame_ctx_p->lex_env_p);
@@ -2121,7 +2121,7 @@ vm_loop (vm_frame_ctx_t *frame_ctx_p) /**< frame context */
         case VM_OC_RUN_FIELD_INIT:
         {
           JERRY_ASSERT (frame_ctx_p->shared_p->status_flags & VM_FRAME_CTX_SHARED_NON_ARROW_FUNC);
-          result = opfunc_init_class_fields (ecma_make_object_value (frame_ctx_p->shared_p->called_object_p),
+          result = opfunc_init_class_fields (ecma_make_object_value (frame_ctx_p->shared_p->function_object_p),
                                              frame_ctx_p->this_binding);
 
           if (ECMA_IS_VALUE_ERROR (result))

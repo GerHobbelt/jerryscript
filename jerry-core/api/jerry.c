@@ -5292,9 +5292,9 @@ jerry_backtrace_get_function (jerry_backtrace_frame_t *frame_p) /**< frame point
   {
     vm_frame_ctx_t *context_p = frame_p->context_p;
 
-    if (context_p->shared_p->called_object_p != NULL)
+    if (context_p->shared_p->function_object_p != NULL)
     {
-      frame_p->function = ecma_make_object_value (context_p->shared_p->called_object_p);
+      frame_p->function = ecma_make_object_value (context_p->shared_p->function_object_p);
       return &frame_p->function;
     }
   }
