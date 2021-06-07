@@ -78,6 +78,8 @@ bool jerry_value_is_string (const jerry_value_t value);
 bool jerry_value_is_symbol (const jerry_value_t value);
 bool jerry_value_is_bigint (const jerry_value_t value);
 bool jerry_value_is_undefined (const jerry_value_t value);
+bool jerry_value_is_true (const jerry_value_t value);
+bool jerry_value_is_false (const jerry_value_t value);
 
 jerry_type_t jerry_value_get_type (const jerry_value_t value);
 jerry_object_type_t jerry_object_get_type (const jerry_value_t value);
@@ -225,9 +227,9 @@ jerry_value_t jerry_define_own_property (const jerry_value_t obj_val,
                                          const jerry_value_t prop_name_val,
                                          const jerry_property_descriptor_t *prop_desc_p);
 
-bool jerry_get_own_property_descriptor (const jerry_value_t obj_val,
-                                        const jerry_value_t prop_name_val,
-                                        jerry_property_descriptor_t *prop_desc_p);
+jerry_value_t jerry_get_own_property_descriptor (const jerry_value_t obj_val,
+                                                 const jerry_value_t prop_name_val,
+                                                 jerry_property_descriptor_t *prop_desc_p);
 void jerry_property_descriptor_free (const jerry_property_descriptor_t *prop_desc_p);
 
 jerry_value_t jerry_call_function (const jerry_value_t func_obj_val, const jerry_value_t this_val,
